@@ -32,11 +32,14 @@ pub fn render(markdown: &str) -> String {
 /// single block separator and discards the rest, so `A\n\n\n\nB` renders the
 /// same as `A\n\nB`. We don't want that — the extra blank lines are deliberate
 /// vertical spacing. The blank-line *count* only survives in the raw source
-/// (the parser drops it), so this runs as a pre-pass: every blank line beyond
-/// the first in a run becomes a `&nbsp;` spacer paragraph, which `comrak`
-/// renders as `<p>\u{00a0}</p>`. The non-breaking space matters — a truly empty
-/// `<p></p>` collapses to nothing in most paste targets, so it would be
-/// invisible; one with content holds its line.
+/// (the parser drops it), so this runs as a pre-pass: every blank line in a run
+/// becomes a `&nbsp;` spacer paragraph, which `comrak` renders as
+/// `<p>\u{00a0}</p>`. The non-breaking space matters — a truly empty `<p></p>`
+/// collapses to nothing in most paste targets, so it would be invisible; one
+/// with content holds its line. One spacer *per* blank line (not per blank line
+/// beyond the first): paste targets stack `<p>`s tightly, so the gap between
+/// two paragraphs isn't itself a visible line — only a spacer is. Anything less
+/// renders one blank line short of the source.
 ///
 /// Two cases are deliberately left alone:
 /// - **Fenced code blocks**, where `comrak` already preserves blank lines
@@ -67,15 +70,15 @@ fn preserve_blank_lines(markdown: &str) -> String {
             out.push(line);
             i += 1;
         } else if !in_code_fence && is_blank(line) && i > first && i < last {
-            // A run of blank lines strictly inside the content region. The
-            // first blank is the normal paragraph break; each one after it
-            // becomes a spacer paragraph, preserving the gap one-for-one.
+            // A run of blank lines strictly inside the content region: emit one
+            // spacer paragraph per blank line so the gap is preserved exactly.
+            // The interleaved "" lines keep each &nbsp; a separate paragraph.
             let start = i;
             while i < last && is_blank(lines[i]) {
                 i += 1;
             }
             out.push("");
-            for _ in 1..(i - start) {
+            for _ in 0..(i - start) {
                 out.push("&nbsp;");
                 out.push("");
             }
@@ -102,7 +105,11 @@ mod tests {
 
     #[test]
     fn heading() {
-        assert_eq!(render("# Hello\n\nworld"), "<h1>Hello</h1>\n<p>world</p>\n");
+        // The blank line between heading and prose is preserved as a spacer.
+        assert_eq!(
+            render("# Hello\n\nworld"),
+            "<h1>Hello</h1>\n<p>\u{a0}</p>\n<p>world</p>\n"
+        );
     }
 
     #[test]
@@ -209,21 +216,22 @@ mod tests {
         assert_eq!(render("   \n  \n"), "");
     }
 
-    /// A single blank line is the normal paragraph break — it must NOT grow a
-    /// spacer, or every ordinary document would gain phantom gaps.
+    /// One blank line in the source is one blank line in the output: a single
+    /// `&nbsp;` spacer paragraph (`\u{a0}`). Paste targets stack `<p>`s tightly,
+    /// so without the spacer this gap would vanish.
     #[test]
-    fn single_blank_line_unchanged() {
-        assert_eq!(render("A\n\nB"), "<p>A</p>\n<p>B</p>\n");
+    fn single_blank_line_becomes_one_spacer() {
+        assert_eq!(render("A\n\nB"), "<p>A</p>\n<p>\u{a0}</p>\n<p>B</p>\n");
     }
 
-    /// The bug this guards: extra blank lines used to collapse away. Now each
-    /// blank beyond the first becomes a `&nbsp;` spacer paragraph (`\u{a0}`),
-    /// so three source blank lines keep two of them as visible spacing.
+    /// The bug this guards: blank-line runs used to collapse. Now the spacer
+    /// count matches the source exactly — three source blank lines yield three
+    /// `&nbsp;` spacer paragraphs, not two (which would render one line short).
     #[test]
-    fn extra_blank_lines_preserved_as_spacers() {
+    fn blank_run_preserved_one_spacer_per_line() {
         assert_eq!(
             render("A\n\n\n\nB"),
-            "<p>A</p>\n<p>\u{a0}</p>\n<p>\u{a0}</p>\n<p>B</p>\n"
+            "<p>A</p>\n<p>\u{a0}</p>\n<p>\u{a0}</p>\n<p>\u{a0}</p>\n<p>B</p>\n"
         );
     }
 
