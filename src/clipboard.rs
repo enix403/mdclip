@@ -23,6 +23,14 @@ use arboard::Clipboard;
 /// Returns `Err` when there is no text flavor available (e.g. the clipboard
 /// holds an image, or is empty). The caller treats that as a fatal,
 /// clipboard-untouched error.
+///
+/// Linux invariant (load-bearing): this builds the `Clipboard` in a local
+/// scope and drops it before returning. On X11, `arboard::Clipboard::new()`
+/// spawns a background serve-thread held in a process-global singleton; its
+/// `Drop` joins that thread and clears the singleton. Dropping here is what
+/// leaves the process single-threaded — and the global cache empty — by the
+/// time `write_html` forks. Do not hoist this `Clipboard` up to share it with
+/// the write path: see the SAFETY note in `write_html_linux`.
 pub fn read_text() -> Result<String, Box<dyn Error>> {
     let mut clipboard = Clipboard::new()?;
     Ok(clipboard.get_text()?)
@@ -56,10 +64,18 @@ pub fn write_html(html: &str, alt_text: &str) -> Result<(), Box<dyn Error>> {
 fn write_html_linux(html: &str, alt_text: &str) -> Result<(), Box<dyn Error>> {
     use arboard::SetExtLinux;
 
-    // SAFETY: `fork()` is inherently unsafe. We do no allocation between the
-    // fork and the point where each branch resumes normal Rust: the parent
-    // returns, and the child immediately builds fresh state and runs to
-    // process exit, never returning to a parent with a now-invalid heap view.
+    // SAFETY: soundness rests on two invariants, not on `fork()` itself:
+    //   1. Single-threaded at this point. `read_text()` built its arboard
+    //      Clipboard in a temporary scope and dropped it before we got here;
+    //      arboard's Drop joins the X11 serve-thread and clears its global
+    //      singleton. So fork() strands no lock held by a vanished thread, and
+    //      the child's Clipboard::new() builds a *fresh* connection rather than
+    //      reusing the parent's via the global cache.
+    //   2. The child never unwinds back into `main`: every branch below ends in
+    //      process::exit, so the inherited copies of html/markdown are never
+    //      dropped in the child (no double-free) and stay read-valid in its
+    //      private copy-on-write copy of the address space.
+    // Do NOT hold an arboard Clipboard open across this fork — it breaks both.
     let pid = unsafe { libc::fork() };
 
     if pid < 0 {
