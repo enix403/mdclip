@@ -5,6 +5,10 @@
 //! strikethrough, autolinks, task lists) are explicitly enabled — without
 //! them `comrak` falls back to plain CommonMark and tables render as literal
 //! pipes, defeating the reason `comrak` was chosen.
+//!
+//! Before parsing we also run [`preserve_blank_lines`]: CommonMark collapses
+//! any run of blank lines between blocks into a single break, but those blank
+//! lines are intentional spacing the user typed, so we keep them.
 
 use comrak::Options;
 
@@ -18,7 +22,78 @@ pub fn render(markdown: &str) -> String {
     options.extension.strikethrough = true;
     options.extension.autolink = true;
     options.extension.tasklist = true;
-    comrak::markdown_to_html(markdown, &options)
+    let markdown = preserve_blank_lines(markdown);
+    comrak::markdown_to_html(&markdown, &options)
+}
+
+/// Keep the blank lines the user typed.
+///
+/// CommonMark treats any run of consecutive blank lines between blocks as a
+/// single block separator and discards the rest, so `A\n\n\n\nB` renders the
+/// same as `A\n\nB`. We don't want that — the extra blank lines are deliberate
+/// vertical spacing. The blank-line *count* only survives in the raw source
+/// (the parser drops it), so this runs as a pre-pass: every blank line beyond
+/// the first in a run becomes a `&nbsp;` spacer paragraph, which `comrak`
+/// renders as `<p>\u{00a0}</p>`. The non-breaking space matters — a truly empty
+/// `<p></p>` collapses to nothing in most paste targets, so it would be
+/// invisible; one with content holds its line.
+///
+/// Two cases are deliberately left alone:
+/// - **Fenced code blocks**, where `comrak` already preserves blank lines
+///   verbatim and injecting `&nbsp;` would corrupt the code.
+/// - **Leading/trailing** blank lines, which markdown discards anyway; only
+///   runs *between* content are expanded.
+fn preserve_blank_lines(markdown: &str) -> String {
+    let lines: Vec<&str> = markdown.split('\n').collect();
+    let is_blank = |line: &str| line.trim().is_empty();
+
+    // Everything before the first / after the last non-blank line is
+    // leading/trailing whitespace markdown drops anyway — bail if there is no
+    // content at all so empty / whitespace-only input stays a no-op.
+    let (Some(first), Some(last)) = (
+        lines.iter().position(|l| !is_blank(l)),
+        lines.iter().rposition(|l| !is_blank(l)),
+    ) else {
+        return markdown.to_string();
+    };
+
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut in_code_fence = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if is_code_fence(line) {
+            in_code_fence = !in_code_fence;
+            out.push(line);
+            i += 1;
+        } else if !in_code_fence && is_blank(line) && i > first && i < last {
+            // A run of blank lines strictly inside the content region. The
+            // first blank is the normal paragraph break; each one after it
+            // becomes a spacer paragraph, preserving the gap one-for-one.
+            let start = i;
+            while i < last && is_blank(lines[i]) {
+                i += 1;
+            }
+            out.push("");
+            for _ in 1..(i - start) {
+                out.push("&nbsp;");
+                out.push("");
+            }
+        } else {
+            out.push(line);
+            i += 1;
+        }
+    }
+    out.join("\n")
+}
+
+/// Whether `line` opens or closes a fenced code block (` ``` ` or `~~~`,
+/// indented up to three spaces per CommonMark). Used only to decide where *not*
+/// to inject spacers; fence pairing by length is left to `comrak`.
+fn is_code_fence(line: &str) -> bool {
+    let trimmed = line.trim_start_matches(' ');
+    let indent = line.len() - trimmed.len();
+    indent <= 3 && (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
 }
 
 #[cfg(test)]
@@ -132,6 +207,41 @@ mod tests {
     #[test]
     fn whitespace_input_is_noop() {
         assert_eq!(render("   \n  \n"), "");
+    }
+
+    /// A single blank line is the normal paragraph break — it must NOT grow a
+    /// spacer, or every ordinary document would gain phantom gaps.
+    #[test]
+    fn single_blank_line_unchanged() {
+        assert_eq!(render("A\n\nB"), "<p>A</p>\n<p>B</p>\n");
+    }
+
+    /// The bug this guards: extra blank lines used to collapse away. Now each
+    /// blank beyond the first becomes a `&nbsp;` spacer paragraph (`\u{a0}`),
+    /// so three source blank lines keep two of them as visible spacing.
+    #[test]
+    fn extra_blank_lines_preserved_as_spacers() {
+        assert_eq!(
+            render("A\n\n\n\nB"),
+            "<p>A</p>\n<p>\u{a0}</p>\n<p>\u{a0}</p>\n<p>B</p>\n"
+        );
+    }
+
+    /// Blank lines inside a fenced code block are the code's own; `comrak`
+    /// keeps them verbatim and we must not inject `&nbsp;` into source.
+    #[test]
+    fn blank_lines_in_code_block_untouched() {
+        assert_eq!(
+            render("```\nx\n\n\ny\n```"),
+            "<pre><code>x\n\n\ny\n</code></pre>\n"
+        );
+    }
+
+    /// Only runs *between* content are expanded; leading/trailing blank lines
+    /// are dropped exactly as CommonMark does.
+    #[test]
+    fn leading_and_trailing_blanks_dropped() {
+        assert_eq!(render("\n\n\nA\n\n\n"), "<p>A</p>\n");
     }
 
     /// Idempotency: because the plaintext fallback is the original markdown,
