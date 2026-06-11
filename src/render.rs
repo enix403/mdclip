@@ -6,10 +6,10 @@
 //! them `comrak` falls back to plain CommonMark and tables render as literal
 //! pipes, defeating the reason `comrak` was chosen.
 //!
-//! [`preserve_blank_lines`] is an *optional* pre-pass the binary applies to the
-//! markdown before [`render`] when the `--preserve-blank-lines` flag is set;
-//! see its docs. It is deliberately not folded into [`render`] so that the
-//! renderer stays a pure CommonMark+GFM transform.
+//! [`preserve_blank_lines`] is a pre-pass the binary applies to the markdown
+//! before [`render`] *by default*, skipping it only under the
+//! `--collapse-blank-lines` flag; see its docs. It is deliberately not folded
+//! into [`render`] so that the renderer stays a pure CommonMark+GFM transform.
 
 use comrak::Options;
 
@@ -26,13 +26,13 @@ pub fn render(markdown: &str) -> String {
     comrak::markdown_to_html(markdown, &options)
 }
 
-/// Keep the blank lines the user typed. Opt-in pre-pass, applied by `main` only
-/// under the `--preserve-blank-lines` flag; the default path skips it.
+/// Keep the blank lines the user typed. This pre-pass is applied by `main` by
+/// default; the `--collapse-blank-lines` flag skips it for plain CommonMark.
 ///
 /// CommonMark treats any run of consecutive blank lines between blocks as a
 /// single block separator and discards the rest, so `A\n\n\n\nB` renders the
-/// same as `A\n\nB`. When the user opts in, the extra blank lines are deliberate
-/// vertical spacing to keep. The blank-line *count* only survives in the raw
+/// same as `A\n\nB`. We treat those extra blank lines as deliberate vertical
+/// spacing to keep. The blank-line *count* only survives in the raw
 /// source (the parser drops it), so this runs *before* [`render`]: every blank
 /// line in a run becomes a `&nbsp;` spacer paragraph, which `comrak` renders as
 /// `<p>\u{00a0}</p>`. The non-breaking space matters — a truly empty `<p></p>`
@@ -104,8 +104,9 @@ fn is_code_fence(line: &str) -> bool {
 mod tests {
     use super::{preserve_blank_lines, render};
 
-    /// The opt-in pipeline the binary runs under `--preserve-blank-lines`:
-    /// the pre-pass, then the renderer. Default-path tests call `render` alone.
+    /// The default pipeline the binary runs: the pre-pass, then the renderer.
+    /// The `--collapse-blank-lines` path calls `render` alone — see
+    /// `render_collapses_blank_runs`.
     fn preserved(markdown: &str) -> String {
         render(&preserve_blank_lines(markdown))
     }
@@ -137,10 +138,7 @@ mod tests {
 
     #[test]
     fn unordered_list() {
-        assert_eq!(
-            render("- a\n- b"),
-            "<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n"
-        );
+        assert_eq!(render("- a\n- b"), "<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n");
     }
 
     #[test]
@@ -179,7 +177,10 @@ mod tests {
         assert!(html.contains("<table>"), "expected a <table>, got: {html}");
         assert!(html.contains("<thead>"));
         assert!(html.contains("<tbody>"));
-        assert!(!html.contains("| a | b |"), "table rendered as literal pipes");
+        assert!(
+            !html.contains("| a | b |"),
+            "table rendered as literal pipes"
+        );
     }
 
     #[test]
@@ -219,10 +220,11 @@ mod tests {
         assert_eq!(render("   \n  \n"), "");
     }
 
-    /// Default path (flag off): blank-line runs collapse, as plain CommonMark.
-    /// This is the behavior `preserve_blank_lines` opts out of.
+    /// The `--collapse-blank-lines` path: the bare renderer collapses blank-line
+    /// runs, as plain CommonMark. The binary applies `preserve_blank_lines` on
+    /// top of this by default (see the `preserve_*` tests below).
     #[test]
-    fn blank_runs_collapse_by_default() {
+    fn render_collapses_blank_runs() {
         assert_eq!(render("A\n\n\n\nB"), "<p>A</p>\n<p>B</p>\n");
     }
 

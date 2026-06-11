@@ -1,9 +1,15 @@
 # TDD: `mdclip` — Markdown → Rich-Text Clipboard Converter
 
-**Status:** Draft
+**Status:** Implemented
 **Author:** qateef.ahmad
 **Date:** 2026-06-11
 **Crate:** `mdclip` (Rust binary, edition 2024)
+
+> **Revision (2026-06-11):** Blank-line preservation is now the **default**
+> rendering behavior, with `--collapse-blank-lines` (`-c`) to opt out, plus
+> `-h`/`--help`. This added a minimal hand-rolled argument parser (still no
+> `clap`). The sections below describe the shipped behavior; the original v1
+> draft specified zero arguments and plain CommonMark output.
 
 ---
 
@@ -27,10 +33,10 @@ The user authors content in **markdown**, but most destinations where that conte
 
 ## Solution
 
-A small cross-platform (macOS + Linux) CLI tool, `mdclip`, that performs a one-shot, zero-argument transform:
+A small cross-platform (macOS + Linux) CLI tool, `mdclip`, that performs a one-shot transform (no arguments required):
 
 1. **Read** the raw markdown text currently on the system clipboard.
-2. **Render** that markdown into HTML (the rich-text representation).
+2. **Render** that markdown into HTML (the rich-text representation), keeping the blank lines between blocks the user typed by default.
 3. **Write** the HTML back to the system clipboard, with the original markdown retained as a plaintext fallback.
 
 The user's workflow becomes: copy markdown → run `mdclip` → paste into the target app, where it appears fully formatted. Because the plaintext fallback is the original markdown, pasting into a plain-text field still yields readable, lossless markdown.
@@ -39,10 +45,10 @@ The user's workflow becomes: copy markdown → run `mdclip` → paste into the t
 
 ## Expected APIs / behavior (examples)
 
-This tool has no public library API and no CLI flags in v1. The "API" is its observable clipboard behavior. The list below is the behavioral contract.
+This tool has no public library API; its "API" is its observable clipboard behavior plus a tiny CLI surface (one flag and `--help`). The list below is the behavioral contract.
 
-1. **Invocation:** `mdclip` with no arguments. There are no flags, subcommands, or positional arguments in v1.
-2. **Happy path (macOS):** clipboard contains `# Hello\n\nworld` → after running, clipboard's HTML flavor contains `<h1>Hello</h1>\n<p>world</p>\n`; process exits 0 immediately.
+1. **Invocation:** `mdclip` with no arguments does the conversion. One optional flag, `-c`/`--collapse-blank-lines`, opts out of blank-line preservation; `-h`/`--help` prints usage and exits 0; any other argument is an error (message to stderr, non-zero exit). No subcommands or positional arguments.
+2. **Happy path (macOS):** clipboard contains `# Hello\n\nworld` → after running with the default (blank lines preserved), the HTML flavor contains `<h1>Hello</h1>\n<p>&nbsp;</p>\n<p>world</p>\n` (the blank line becomes a `&nbsp;` spacer — a non-breaking space); with `--collapse-blank-lines` it is `<h1>Hello</h1>\n<p>world</p>\n`. Process exits 0 immediately.
 3. **Happy path (Linux):** same input → parent process exits 0 immediately; a forked child holds the clipboard selection and serves the HTML on the next paste.
 4. **Bold:** `**bold**` → `<p><strong>bold</strong></p>`.
 5. **Italic:** `*italic*` → `<p><em>italic</em></p>`.
@@ -62,6 +68,10 @@ This tool has no public library API and no CLI flags in v1. The "API" is its obs
 19. **No text on clipboard (image, or empty):** `get_text()` returns `Err` → tool prints a message to **stderr** and exits **non-zero**; the clipboard is left untouched.
 20. **Non-fatal content:** any valid UTF-8 text is accepted as markdown; plain prose with no markdown syntax renders as `<p>…</p>`.
 21. **No success chatter (v1):** on success the tool is allowed to be silent (no required stdout/stderr message). Errors always go to stderr with a non-zero exit.
+22. **Blank-line preservation (default):** `A\n\n\n\nB` (three blank lines between the paragraphs) → `<p>A</p>\n<p>&nbsp;</p>\n<p>&nbsp;</p>\n<p>&nbsp;</p>\n<p>B</p>\n` — one `&nbsp;` spacer paragraph per source blank line (a non-breaking space, so the line stays visible in paste targets that collapse empty `<p>`). Blank lines inside fenced code blocks are left verbatim; leading/trailing blank lines are dropped.
+23. **Collapse opt-out:** with `-c`/`--collapse-blank-lines`, the same input renders as plain CommonMark — `<p>A</p>\n<p>B</p>\n`.
+24. **Help:** `-h`/`--help` prints a usage summary to **stdout** and exits **0**; the clipboard is left untouched.
+25. **Unrecognized argument:** e.g. `mdclip --nope` prints ``mdclip: unrecognized argument '--nope'; run `mdclip --help` for usage`` to **stderr** and exits **non-zero**; the clipboard is left untouched.
 
 ---
 
@@ -90,6 +100,14 @@ let html = comrak::markdown_to_html(&markdown, &options);
 
 We ship `comrak`'s output **unmodified** — bare semantic tags (`<h1>`, `<strong>`, `<table>`, `<pre><code>`, …) with **no inline CSS** and **no syntax highlighting**. Rationale: rich-text editors re-style pasted semantic HTML with their own theme, so bare semantic HTML pastes more predictably than styled HTML; inline CSS can fight the target editor. Syntax highlighting (which would require a heavy dependency like `syntect`) is deferred — paste targets frequently strip span colors anyway.
 
+(One transform happens before `render`, not after: see blank-line preservation below.)
+
+### Blank-line preservation (default), with an opt-out
+
+CommonMark collapses any run of blank lines between blocks into a single paragraph break, discarding the rest. `mdclip` keeps them **by default**: a pre-pass (`render::preserve_blank_lines`, run *before* `render` because the parser drops the blank-line count) turns each blank line in a run into a `&nbsp;` spacer paragraph. The non-breaking space is deliberate — a truly empty `<p></p>` collapses to nothing in most paste targets, so the spacer would be invisible; one spacer is emitted *per* blank line, because targets stack `<p>`s tightly and the inter-paragraph gap isn't itself a visible line.
+
+The pre-pass deliberately leaves two things alone: blank lines inside **fenced code blocks** (which `comrak` already preserves verbatim, and where injecting `&nbsp;` would corrupt the code) and **leading/trailing** blank lines (dropped, as markdown does). It is kept *separate* from `render` — `render` stays a pure CommonMark+GFM transform and `main` composes the two — and `--collapse-blank-lines` (`-c`) simply skips it for standard CommonMark output.
+
 ### Input: clipboard only; markdown as fallback
 
 - Input is read from the clipboard via `arboard`'s `get_text()`. **stdin support is deferred** (not in v1).
@@ -104,17 +122,17 @@ We ship `comrak`'s output **unmodified** — bare semantic tags (`<h1>`, `<stron
   - The **child** builds the `arboard::Clipboard` *after* the fork (X11/Wayland socket connections do not survive a fork cleanly) and calls `clipboard.set().wait().html(html, Some(markdown))`. `.wait()` blocks the child, serving the selection until another app takes ownership, after which the child exits on its own. This mirrors `wl-copy`'s behavior.
   - All Linux-specific code is gated behind `#[cfg(target_os = "linux")]`; macOS keeps the trivial set-and-exit path.
 
-### CLI surface: none
+### CLI surface: minimal, hand-rolled
 
-v1 takes zero arguments. No argument parser (`clap` rejected as overkill), no `--help`/`--version`, no required success message. Goal is a functional tool first; niceties come later.
+The default invocation takes no arguments. A small hand-rolled parser (no `clap` — still overkill for this surface) recognizes `-c`/`--collapse-blank-lines` and `-h`/`--help`; any other argument is a hard error pointing at `--help`. There is no `--version` and no required success message. `main` returns `ExitCode`; a `dispatch` helper does the fallible work and `main` maps its `Result`, printing errors as `mdclip: <message>` (the error's `Display`) — cleaner than the `Error: "…"` `Debug` output a `Result`-returning `main` emits.
 
 ### Modules / sketch
 
 For a tool this size a single `src/main.rs` is acceptable, but the logical decomposition is:
 
-- **`render`** — pure function `fn render(markdown: &str) -> String`: configures `comrak::Options` (GFM extensions on) and returns HTML. Pure and trivially unit-testable.
+- **`render`** — `pub fn render(markdown: &str) -> String`: configures `comrak::Options` (GFM extensions on) and returns HTML. Pure and trivially unit-testable. Alongside it, `pub fn preserve_blank_lines(markdown: &str) -> String` is the blank-line pre-pass (default-on, applied by `main`), kept separate so `render` stays pure.
 - **`clipboard`** — reading (`get_text`) and the platform-divergent write. Contains the `#[cfg(target_os = "linux")]` fork path and the `#[cfg(not(target_os = "linux"))]` (macOS) direct path.
-- **`main`** — orchestration: read → guard empty/error → render → write. Returns `Result<(), Box<dyn std::error::Error>>` for clean error propagation to a non-zero exit.
+- **`main`** — argument parsing (`parse_args` → an `Outcome` enum) and orchestration: parse → read → guard empty/error → (optionally preserve) → render → write. Returns `ExitCode`; a `dispatch` helper performs the fallible work and `main` maps its `Result` to an exit code, printing errors as `mdclip: <message>`.
 
 ### Dependencies
 
@@ -129,6 +147,8 @@ For a tool this size a single `src/main.rs` is acceptable, but the logical decom
 - **`render` module — unit tests (primary coverage).** Pure `String -> String`, so assert on rendered HTML for: heading, bold, italic, inline code, list (ordered/unordered), link, code block, and each enabled GFM extension (table, strikethrough, task list, autolink). The table test is the highest-value test — it guards the "extensions enabled" decision against regression.
 - **Idempotency test.** `render(markdown)` followed by feeding the *fallback markdown* back through `render` yields identical HTML.
 - **Empty/whitespace input.** `render("")` and the main-level guard for empty clipboard string behave as no-ops.
+- **Blank-line preservation tests.** The pre-pass + renderer pipeline: one `&nbsp;` spacer per blank line for single and multi-blank runs, fenced-code blanks left verbatim, leading/trailing blanks dropped — plus the bare renderer collapsing runs (the `--collapse-blank-lines` path).
+- **Argument parsing tests.** `parse_args` maps no args → preserve (collapse off), `-c`/`--collapse-blank-lines` → collapse on, `-h`/`--help` → help, and an unknown argument → error.
 - **Clipboard / fork paths — not unit tested.** Clipboard I/O and `fork()` depend on a live display server/pasteboard and are environment-bound; they are excluded from automated tests and validated manually (copy markdown → run → paste into a target app on each OS). No prior art exists in this fresh crate; tests will be standard Rust `#[cfg(test)]` modules / `tests/` integration files.
 
 ---
@@ -138,7 +158,7 @@ For a tool this size a single `src/main.rs` is acceptable, but the logical decom
 - **RTF** (and any non-HTML rich format).
 - **Inline CSS styling** and **syntax highlighting** of code blocks.
 - **stdin input**, file input, or any non-clipboard source.
-- **CLI flags**, argument parsing, `--help`/`--version`, success/progress messaging.
+- **`--version`**, broader configuration or subcommands, and success/progress messaging. (A single `--collapse-blank-lines` flag, `--help`, and a minimal argument parser are now *in* scope — see "CLI surface" above.)
 - **Windows** support.
 - Best-effort guarantees beyond the documented Linux fork behavior (e.g. clipboard managers, persistence after the serving child exits without anyone pasting).
 
@@ -148,4 +168,4 @@ For a tool this size a single `src/main.rs` is acceptable, but the logical decom
 
 - **Why the child creates the clipboard, not the parent:** X11/Wayland connections are sockets that don't survive `fork()` reliably; constructing `arboard::Clipboard` in the child after forking avoids a broken connection.
 - **Idempotency is a free property**, not a feature to build — it falls out of choosing the original markdown as the plaintext fallback.
-- **Future enhancements** (all deferred): RTF flavor via platform-specific code (`NSPasteboard` / `wl-copy`), `--stdin`, syntax highlighting via `syntect`, an arg parser (`clap`) once flags exist, and a `--serve`/daemon mode if the fork approach proves insufficient.
+- **Future enhancements** (all deferred): RTF flavor via platform-specific code (`NSPasteboard` / `wl-copy`), `--stdin`, syntax highlighting via `syntect`, adopting an arg parser (`clap`) if the CLI outgrows the current hand-rolled handful of flags, and a `--serve`/daemon mode if the fork approach proves insufficient.

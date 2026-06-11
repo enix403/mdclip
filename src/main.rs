@@ -1,8 +1,8 @@
 //! `mdclip` — read markdown from the clipboard, render it to HTML, and write
 //! the HTML back with the original markdown retained as a plaintext fallback.
 //!
-//! One shot. Takes no arguments by default; the optional
-//! `--preserve-blank-lines` flag keeps blank lines instead of collapsing them.
+//! One shot. By default blank lines between blocks are preserved; the optional
+//! `--collapse-blank-lines` flag collapses them as plain CommonMark does.
 //! See `tdds/mdclip-v1.md` for the core design.
 
 mod clipboard;
@@ -16,17 +16,18 @@ const USAGE: &str = "\
 Usage: mdclip [OPTIONS]
 
 Render the markdown on the clipboard to HTML, in place.
+Blank lines between blocks are kept by default.
 
 Options:
-  -b, --preserve-blank-lines  Keep every blank line between blocks (each becomes
-                              a spacer) instead of collapsing each run to one.
+  -c, --collapse-blank-lines  Collapse each run of blank lines into a single
+                              break, as plain CommonMark does.
   -h, --help                  Print this help and exit.";
 
 /// What the parsed command line asks us to do.
 #[derive(Debug, PartialEq)]
 enum Outcome {
-    /// Do the conversion; `preserve_blank_lines` mirrors the flag.
-    Run { preserve_blank_lines: bool },
+    /// Do the conversion; `collapse_blank_lines` mirrors the flag.
+    Run { collapse_blank_lines: bool },
     /// `-h`/`--help` was given — print usage and exit successfully.
     HelpRequested,
 }
@@ -50,18 +51,18 @@ fn dispatch() -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         Outcome::Run {
-            preserve_blank_lines,
-        } => run(preserve_blank_lines),
+            collapse_blank_lines,
+        } => run(collapse_blank_lines),
     }
 }
 
 /// Parse the argument list (program name already stripped) into an [`Outcome`].
 /// Unknown arguments are a hard error pointing at `--help`.
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Outcome, Box<dyn Error>> {
-    let mut preserve_blank_lines = false;
+    let mut collapse_blank_lines = false;
     for arg in args {
         match arg.as_str() {
-            "-b" | "--preserve-blank-lines" => preserve_blank_lines = true,
+            "-c" | "--collapse-blank-lines" => collapse_blank_lines = true,
             "-h" | "--help" => return Ok(Outcome::HelpRequested),
             other => {
                 return Err(format!(
@@ -72,13 +73,15 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Outcome, Box<dyn Err
         }
     }
     Ok(Outcome::Run {
-        preserve_blank_lines,
+        collapse_blank_lines,
     })
 }
 
-/// Read the clipboard, render, and write it back. `preserve_blank_lines` opts
-/// into the blank-line pre-pass; the fallback is always the original markdown.
-fn run(preserve_blank_lines: bool) -> Result<(), Box<dyn Error>> {
+/// Read the clipboard, render, and write it back. Blank lines are preserved by
+/// default; `collapse_blank_lines` (the `--collapse-blank-lines` flag) skips
+/// that pre-pass for plain CommonMark. The fallback is always the original
+/// markdown.
+fn run(collapse_blank_lines: bool) -> Result<(), Box<dyn Error>> {
     // Read first: a missing text flavor is a fatal error (clipboard untouched).
     let markdown = clipboard::read_text()?;
 
@@ -87,10 +90,10 @@ fn run(preserve_blank_lines: bool) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let html = if preserve_blank_lines {
-        render::render(&render::preserve_blank_lines(&markdown))
-    } else {
+    let html = if collapse_blank_lines {
         render::render(&markdown)
+    } else {
+        render::render(&render::preserve_blank_lines(&markdown))
     };
     clipboard::write_html(&html, &markdown)?;
 
@@ -106,22 +109,22 @@ mod tests {
     }
 
     #[test]
-    fn no_args_runs_with_preserve_off() {
+    fn no_args_preserves_blank_lines_by_default() {
         assert_eq!(
             parse(&[]),
             Ok(Outcome::Run {
-                preserve_blank_lines: false
+                collapse_blank_lines: false
             })
         );
     }
 
     #[test]
-    fn flag_enables_preserve() {
+    fn flag_enables_collapse() {
         let on = Ok(Outcome::Run {
-            preserve_blank_lines: true,
+            collapse_blank_lines: true,
         });
-        assert_eq!(parse(&["--preserve-blank-lines"]), on);
-        assert_eq!(parse(&["-b"]), on);
+        assert_eq!(parse(&["--collapse-blank-lines"]), on);
+        assert_eq!(parse(&["-c"]), on);
     }
 
     #[test]

@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 
-cargo install --path . --force
+exec cargo install --path . --force

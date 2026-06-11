@@ -16,7 +16,7 @@ In one shot, `mdclip`:
 2. **Renders** it to HTML via [`comrak`](https://crates.io/crates/comrak) (GitHub-Flavored Markdown).
 3. **Writes** the HTML back to the clipboard, keeping the original markdown as a plaintext fallback.
 
-It takes no arguments by default; one optional flag, `--preserve-blank-lines`, is described under [Usage](#usage).
+It takes no arguments by default; one optional flag, `--collapse-blank-lines`, is described under [Usage](#usage).
 
 Because the plaintext fallback is the original markdown, pasting into a plain-text field (a terminal, a code editor, a `<textarea>`) still yields clean, readable markdown. Targets that understand HTML get the formatted version; everything else gets the markdown.
 
@@ -38,22 +38,22 @@ cargo build --release
 ## Usage
 
 ```sh
-mdclip                         # render; blank-line runs collapse (CommonMark default)
-mdclip --preserve-blank-lines  # keep every blank line between blocks (short: -b)
-mdclip --help                  # print usage
+mdclip                        # render, keeping blank lines between blocks (default)
+mdclip --collapse-blank-lines # collapse blank-line runs, as plain CommonMark (short: -c)
+mdclip --help                 # print usage
 ```
 
 A typical flow:
 
 1. Select and copy some markdown.
-2. Run `mdclip` (add `--preserve-blank-lines`, or `-b`, to keep your blank lines).
+2. Run `mdclip` (add `--collapse-blank-lines`, or `-c`, for plain CommonMark spacing).
 3. Paste into your target app.
 
 On success the tool is silent and exits `0`. If the clipboard holds no text (it's empty or contains an image), `mdclip` prints a message to stderr, exits non-zero, and leaves the clipboard untouched. An empty clipboard string is a no-op. An unrecognized argument is an error.
 
 ### Blank lines
 
-By default `mdclip` follows CommonMark: any run of blank lines between blocks collapses to a single paragraph break. Pass `--preserve-blank-lines` (`-b`) to keep them — each blank line in the source becomes a spacer paragraph (`<p>&nbsp;</p>`), so the vertical spacing you typed survives the paste. (The non-breaking space is deliberate: a truly empty `<p></p>` collapses to nothing in most paste targets.) Blank lines inside fenced code blocks are always kept verbatim; leading and trailing blank lines are always dropped.
+By default `mdclip` keeps the blank lines you typed: each blank line between blocks becomes a spacer paragraph (`<p>&nbsp;</p>`), so the vertical spacing survives the paste. (The non-breaking space is deliberate: a truly empty `<p></p>` collapses to nothing in most paste targets.) This departs from CommonMark, which collapses any run of blank lines to a single paragraph break — pass `--collapse-blank-lines` (`-c`) to get that standard behavior instead. Either way, blank lines inside fenced code blocks are kept verbatim, and leading and trailing blank lines are dropped.
 
 ## Supported markdown
 
