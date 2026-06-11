@@ -6,9 +6,10 @@
 //! them `comrak` falls back to plain CommonMark and tables render as literal
 //! pipes, defeating the reason `comrak` was chosen.
 //!
-//! Before parsing we also run [`preserve_blank_lines`]: CommonMark collapses
-//! any run of blank lines between blocks into a single break, but those blank
-//! lines are intentional spacing the user typed, so we keep them.
+//! [`preserve_blank_lines`] is an *optional* pre-pass the binary applies to the
+//! markdown before [`render`] when the `--preserve-blank-lines` flag is set;
+//! see its docs. It is deliberately not folded into [`render`] so that the
+//! renderer stays a pure CommonMark+GFM transform.
 
 use comrak::Options;
 
@@ -22,18 +23,18 @@ pub fn render(markdown: &str) -> String {
     options.extension.strikethrough = true;
     options.extension.autolink = true;
     options.extension.tasklist = true;
-    let markdown = preserve_blank_lines(markdown);
-    comrak::markdown_to_html(&markdown, &options)
+    comrak::markdown_to_html(markdown, &options)
 }
 
-/// Keep the blank lines the user typed.
+/// Keep the blank lines the user typed. Opt-in pre-pass, applied by `main` only
+/// under the `--preserve-blank-lines` flag; the default path skips it.
 ///
 /// CommonMark treats any run of consecutive blank lines between blocks as a
 /// single block separator and discards the rest, so `A\n\n\n\nB` renders the
-/// same as `A\n\nB`. We don't want that — the extra blank lines are deliberate
-/// vertical spacing. The blank-line *count* only survives in the raw source
-/// (the parser drops it), so this runs as a pre-pass: every blank line in a run
-/// becomes a `&nbsp;` spacer paragraph, which `comrak` renders as
+/// same as `A\n\nB`. When the user opts in, the extra blank lines are deliberate
+/// vertical spacing to keep. The blank-line *count* only survives in the raw
+/// source (the parser drops it), so this runs *before* [`render`]: every blank
+/// line in a run becomes a `&nbsp;` spacer paragraph, which `comrak` renders as
 /// `<p>\u{00a0}</p>`. The non-breaking space matters — a truly empty `<p></p>`
 /// collapses to nothing in most paste targets, so it would be invisible; one
 /// with content holds its line. One spacer *per* blank line (not per blank line
@@ -46,7 +47,7 @@ pub fn render(markdown: &str) -> String {
 ///   verbatim and injecting `&nbsp;` would corrupt the code.
 /// - **Leading/trailing** blank lines, which markdown discards anyway; only
 ///   runs *between* content are expanded.
-fn preserve_blank_lines(markdown: &str) -> String {
+pub fn preserve_blank_lines(markdown: &str) -> String {
     let lines: Vec<&str> = markdown.split('\n').collect();
     let is_blank = |line: &str| line.trim().is_empty();
 
@@ -101,15 +102,17 @@ fn is_code_fence(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::render;
+    use super::{preserve_blank_lines, render};
+
+    /// The opt-in pipeline the binary runs under `--preserve-blank-lines`:
+    /// the pre-pass, then the renderer. Default-path tests call `render` alone.
+    fn preserved(markdown: &str) -> String {
+        render(&preserve_blank_lines(markdown))
+    }
 
     #[test]
     fn heading() {
-        // The blank line between heading and prose is preserved as a spacer.
-        assert_eq!(
-            render("# Hello\n\nworld"),
-            "<h1>Hello</h1>\n<p>\u{a0}</p>\n<p>world</p>\n"
-        );
+        assert_eq!(render("# Hello\n\nworld"), "<h1>Hello</h1>\n<p>world</p>\n");
     }
 
     #[test]
@@ -216,40 +219,49 @@ mod tests {
         assert_eq!(render("   \n  \n"), "");
     }
 
-    /// One blank line in the source is one blank line in the output: a single
-    /// `&nbsp;` spacer paragraph (`\u{a0}`). Paste targets stack `<p>`s tightly,
-    /// so without the spacer this gap would vanish.
+    /// Default path (flag off): blank-line runs collapse, as plain CommonMark.
+    /// This is the behavior `preserve_blank_lines` opts out of.
     #[test]
-    fn single_blank_line_becomes_one_spacer() {
-        assert_eq!(render("A\n\nB"), "<p>A</p>\n<p>\u{a0}</p>\n<p>B</p>\n");
+    fn blank_runs_collapse_by_default() {
+        assert_eq!(render("A\n\n\n\nB"), "<p>A</p>\n<p>B</p>\n");
     }
 
-    /// The bug this guards: blank-line runs used to collapse. Now the spacer
-    /// count matches the source exactly — three source blank lines yield three
-    /// `&nbsp;` spacer paragraphs, not two (which would render one line short).
+    /// With the pre-pass, one blank line in the source is one blank line in the
+    /// output: a single `&nbsp;` spacer paragraph (`\u{a0}`). Paste targets
+    /// stack `<p>`s tightly, so without the spacer this gap would vanish.
     #[test]
-    fn blank_run_preserved_one_spacer_per_line() {
+    fn preserve_single_blank_line_becomes_one_spacer() {
+        assert_eq!(preserved("A\n\nB"), "<p>A</p>\n<p>\u{a0}</p>\n<p>B</p>\n");
+    }
+
+    /// The bug this guards: blank-line runs used to collapse. With the pre-pass
+    /// the spacer count matches the source exactly — three source blank lines
+    /// yield three `&nbsp;` spacers, not two (which would render one line short).
+    #[test]
+    fn preserve_blank_run_one_spacer_per_line() {
         assert_eq!(
-            render("A\n\n\n\nB"),
+            preserved("A\n\n\n\nB"),
             "<p>A</p>\n<p>\u{a0}</p>\n<p>\u{a0}</p>\n<p>\u{a0}</p>\n<p>B</p>\n"
         );
     }
 
-    /// Blank lines inside a fenced code block are the code's own; `comrak`
-    /// keeps them verbatim and we must not inject `&nbsp;` into source.
+    /// Even with the pre-pass, blank lines inside a fenced code block are the
+    /// code's own; `comrak` keeps them verbatim and we must not inject `&nbsp;`.
     #[test]
-    fn blank_lines_in_code_block_untouched() {
+    fn preserve_leaves_code_block_blanks_untouched() {
         assert_eq!(
-            render("```\nx\n\n\ny\n```"),
+            preserved("```\nx\n\n\ny\n```"),
             "<pre><code>x\n\n\ny\n</code></pre>\n"
         );
     }
 
     /// Only runs *between* content are expanded; leading/trailing blank lines
-    /// are dropped exactly as CommonMark does.
+    /// are dropped exactly as CommonMark does, even with the pre-pass.
     #[test]
-    fn leading_and_trailing_blanks_dropped() {
-        assert_eq!(render("\n\n\nA\n\n\n"), "<p>A</p>\n");
+    fn preserve_drops_leading_and_trailing_blanks() {
+        assert_eq!(preserved("\n\n\nA\n\n\n"), "<p>A</p>\n");
+        // Whitespace-only input stays a no-op through the pre-pass too.
+        assert_eq!(preserved("   \n  \n"), "");
     }
 
     /// Idempotency: because the plaintext fallback is the original markdown,

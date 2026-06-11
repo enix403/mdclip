@@ -10,11 +10,13 @@ Most apps where you paste — Gmail, Slack, Notion, Google Docs, Linear, Discord
 copy markdown  →  run mdclip  →  paste (formatted)
 ```
 
-`mdclip` takes no arguments. In one shot it:
+In one shot, `mdclip`:
 
 1. **Reads** the raw markdown text on the system clipboard.
 2. **Renders** it to HTML via [`comrak`](https://crates.io/crates/comrak) (GitHub-Flavored Markdown).
 3. **Writes** the HTML back to the clipboard, keeping the original markdown as a plaintext fallback.
+
+It takes no arguments by default; one optional flag, `--preserve-blank-lines`, is described under [Usage](#usage).
 
 Because the plaintext fallback is the original markdown, pasting into a plain-text field (a terminal, a code editor, a `<textarea>`) still yields clean, readable markdown. Targets that understand HTML get the formatted version; everything else gets the markdown.
 
@@ -36,16 +38,22 @@ cargo build --release
 ## Usage
 
 ```sh
-mdclip
+mdclip                         # render; blank-line runs collapse (CommonMark default)
+mdclip --preserve-blank-lines  # keep every blank line between blocks (short: -b)
+mdclip --help                  # print usage
 ```
 
-That's it — no flags, no subcommands. A typical flow:
+A typical flow:
 
 1. Select and copy some markdown.
-2. Run `mdclip`.
+2. Run `mdclip` (add `--preserve-blank-lines`, or `-b`, to keep your blank lines).
 3. Paste into your target app.
 
-On success the tool is silent and exits `0`. If the clipboard holds no text (it's empty or contains an image), `mdclip` prints a message to stderr, exits non-zero, and leaves the clipboard untouched. An empty clipboard string is a no-op.
+On success the tool is silent and exits `0`. If the clipboard holds no text (it's empty or contains an image), `mdclip` prints a message to stderr, exits non-zero, and leaves the clipboard untouched. An empty clipboard string is a no-op. An unrecognized argument is an error.
+
+### Blank lines
+
+By default `mdclip` follows CommonMark: any run of blank lines between blocks collapses to a single paragraph break. Pass `--preserve-blank-lines` (`-b`) to keep them — each blank line in the source becomes a spacer paragraph (`<p>&nbsp;</p>`), so the vertical spacing you typed survives the paste. (The non-breaking space is deliberate: a truly empty `<p></p>` collapses to nothing in most paste targets.) Blank lines inside fenced code blocks are always kept verbatim; leading and trailing blank lines are always dropped.
 
 ## Supported markdown
 
@@ -68,7 +76,7 @@ Running `mdclip` twice in a row is safe: the second run reads the markdown back 
 
 ## Scope
 
-`mdclip` deliberately does one thing. Out of scope for now: RTF and other non-HTML rich formats, inline CSS styling, syntax highlighting, stdin/file input, CLI flags, and Windows support.
+`mdclip` deliberately does one thing. Out of scope for now: RTF and other non-HTML rich formats, inline CSS styling, syntax highlighting, stdin/file input, broader CLI configuration, and Windows support.
 
 ## Development
 
